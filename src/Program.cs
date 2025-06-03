@@ -6,31 +6,56 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using System.IO;
+using System.Linq.Expressions;
 
 namespace SshRunas
 {
     static class Program
     {
+
         static async Task Main(string[] args)
         {
+
+            string raw = Environment.CommandLine;
+            string exePath = Environment.GetCommandLineArgs()[0];
+            string requestedCommand = raw.Substring(exePath.Length).TrimStart();
+
+            Console.WriteLine("Executing command: " + requestedCommand);
+
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 Console.Error.WriteLine("This program is only supported on Windows.");
-                
+
                 System.Environment.ExitCode = 1;
                 return;
             }
-            
+
             var username = Environment.GetEnvironmentVariable("SSH_RUNNER_USER");
             var password = Environment.GetEnvironmentVariable("SSH_RUNNER_PWD");
 
-            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password) )
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
             {
-                Console.Error.WriteLine("User name or password is not specified.");
+                Console.Error.WriteLine("User name or password is not specified in the environment SSH_RUNNER_USER and SSH_RUNNER_PWD.");
                 System.Environment.ExitCode = 2;
                 return;
             }
 
+            CreateUserIfNecessary(username, password);
+
+            await SshRun("localhost", username, password, requestedCommand);
+
+
+
+        }
+
+        private static void CreateUserIfNecessary(string username, string password)
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                Console.WriteLine("Skipping user creation on non-Windows platform.");
+                return;
+            }
             using (PrincipalContext context = new PrincipalContext(ContextType.Machine))
             {
                 // Search for the user in the local machine context
@@ -68,52 +93,64 @@ namespace SshRunas
 
                 }
             }
-
-            await SshRun(username, password, string.Join(" ", args));
-
         }
 
-        private static async Task SshRun(string user, string password, string command)
+        private static async Task SshRun(string host, string user, string password, string command)
         {
-            var commands = new [] { $"CD \"{Environment.CurrentDirectory}\"", command };
-            var actualCmd = $"C:\\Windows\\System32\\cmd.exe /c \"{string.Join(" && ", commands).Replace("\"","\"\"")}\"";
-            using (var client = new SshClient("localhost", user, password))
+            var commands = new[]
             {
-                client.Connect();
-                var cmd = client.CreateCommand(actualCmd);
-                var cmdExec = cmd.ExecuteAsync();
-                using (var stdout = new StreamReader(cmd.OutputStream))
+                $"CD \"{Environment.CurrentDirectory}\"",
+                command
+            };
+
+            string tempBat = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.bat");
+            File.WriteAllLines(tempBat, commands);
+
+            try
+            {
+                var actualCmd = $"C:\\Windows\\System32\\cmd.exe /c \"{tempBat}\"";
+                using (var client = new SshClient(host, user, password))
                 {
-
-                    Task stdoutTask = Task.Run(async () =>
+                    client.Connect();
+                    var cmd = client.CreateCommand(actualCmd);
+                    var cmdExec = cmd.ExecuteAsync();
+                    using (var stdout = new StreamReader(cmd.OutputStream))
                     {
-                        while (!stdout.EndOfStream)
-                        {
-                            var line = await stdout.ReadLineAsync();
-                            Console.WriteLine(line);
-                        }
-                    });
 
-                    // Read stderr asynchronously
-                    using (var stderr = new StreamReader(cmd.ExtendedOutputStream))
-                    {
-                        Task stderrTask = Task.Run(async () =>
+                        Task stdoutTask = Task.Run(async () =>
                         {
-                            while (!stderr.EndOfStream)
+                            while (!stdout.EndOfStream)
                             {
-                                var line = await stderr.ReadLineAsync();
-                                Console.Error.WriteLine(line);
+                                var line = await stdout.ReadLineAsync();
+                                Console.WriteLine(line);
                             }
                         });
 
-                        await Task.WhenAll(stdoutTask, stderrTask, cmdExec);
-                    }
-                }
+                        // Read stderr asynchronously
+                        using (var stderr = new StreamReader(cmd.ExtendedOutputStream))
+                        {
+                            Task stderrTask = Task.Run(async () =>
+                            {
+                                while (!stderr.EndOfStream)
+                                {
+                                    var line = await stderr.ReadLineAsync();
+                                    Console.Error.WriteLine(line);
+                                }
+                            });
 
+                            await Task.WhenAll(stdoutTask, stderrTask, cmdExec);
+                        }
+                    }
+
+                }
+            }
+            finally
+            {
+                File.Delete(tempBat);
             }
         }
 
-        
+
     }
 
 }
