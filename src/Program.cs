@@ -8,6 +8,10 @@ using System.Security.Principal;
 using System.Text;
 using System.IO;
 using System.Linq.Expressions;
+using System.Collections;
+using Org.BouncyCastle.Asn1.X509;
+using Org.BouncyCastle.Utilities;
+using Renci.SshNet.Security;
 
 namespace SshRunas
 {
@@ -97,14 +101,53 @@ namespace SshRunas
 
         private static async Task SshRun(string host, string user, string password, string command)
         {
-            var commands = new[]
+            var lines = new List<string>
             {
-                $"CD \"{Environment.CurrentDirectory}\"",
-                command
+                "@echo off"
             };
 
-            string tempBat = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.bat");
-            File.WriteAllLines(tempBat, commands);
+
+            var envVars = Environment.GetEnvironmentVariables(EnvironmentVariableTarget.Process);
+            var systemEnvVars = Environment.GetEnvironmentVariables(EnvironmentVariableTarget.Machine);
+            var userEnvVars = Environment.GetEnvironmentVariables(EnvironmentVariableTarget.User);
+            var finalList = new Dictionary<string, string>(); 
+            var builtInVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                 "ALLUSERSPROFILE", "APPDATA", "CommonProgramFiles", "CommonProgramFiles(x86)",
+                "CommonProgramW6432", "COMPUTERNAME", "ComSpec", "HOMEDRIVE", "HOMEPATH",
+                "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "OS", "PATH", "PATHEXT",
+                "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "ProgramData",
+                "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "PROMPT",
+                "PUBLIC", "SESSIONNAME", "SystemDrive", "SystemRoot", "TEMP", "TMP",
+                "USERDOMAIN", "USERNAME", "USERPROFILE", "WINDIR", "LOGONSERVER",
+                "USERDOMAIN_ROAMINGPROFILE", "USERDNSDOMAIN", "CLIENTNAME"
+            };
+            foreach (DictionaryEntry item in envVars)
+            {
+                if (builtInVars.Contains(item.Key) || systemEnvVars.Contains(item.Key) || userEnvVars.Contains(item.Key))
+                {
+                    // Skip if the variable is already set in system or user scope
+                    continue;
+                }
+                Console.WriteLine("Found Process Environment Variable: {0}", item.Key);
+                string value = item.Value?.ToString() ?? String.Empty;
+                value = value.Replace("^", "^^")
+                         .Replace("&", "^&")
+                         .Replace("|", "^|")
+                         .Replace("<", "^<")
+                         .Replace(">", "^>")
+                         .Replace("%", "%%")
+                .Replace("\"", "\\\"");
+
+                lines.Add($"set \"{item.Key}={value}\"");
+            }
+            lines.Add($"CD \"{Environment.CurrentDirectory}\"");
+            lines.Add(command);
+
+            var tempPath = Path.GetTempPath();
+            string tempBat = Path.Combine(tempPath, $"{Guid.NewGuid()}.bat");
+            Directory.CreateDirectory(tempPath);
+            File.WriteAllLines(tempBat, lines.ToArray());
 
             try
             {
