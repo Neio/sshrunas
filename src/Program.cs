@@ -21,13 +21,28 @@ namespace SshRunas
         static async Task Main(string[] args)
         {
             string commandLine = Environment.CommandLine;
-            bool inQuotes = false;
+            
+            // Robust command-line parsing to skip the current executable.
+            // Environment.GetCommandLineArgs() provides correctly parsed arguments.
+            // The first argument is the path to the executable.
+            string[] commandLineArgs = Environment.GetCommandLineArgs();
+            string executablePath = commandLineArgs[0];
+            
             int i = 0;
+            bool inQuotes = false;
+            // Find the end of the executable path in the raw command line
             for (; i < commandLine.Length; i++)
             {
                 if (commandLine[i] == '"') inQuotes = !inQuotes;
-                if (commandLine[i] == ' ' && !inQuotes) break;
+                if (commandLine[i] == ' ' && !inQuotes)
+                {
+                    // Check if we matched the executable path
+                    string candidate = commandLine.Substring(0, i).Trim('\"');
+                    if (string.Equals(candidate, executablePath, StringComparison.OrdinalIgnoreCase))
+                        break;
+                }
             }
+            
             string requestedCommand = commandLine.Substring(i).Trim();
 
             if (string.IsNullOrEmpty(requestedCommand))
@@ -85,22 +100,26 @@ namespace SshRunas
                         user.Enabled = true;
                         user.Save();
                         Console.WriteLine("User is created successfully.");
+                    }
 
-                        // Use SID for Administrators group (S-1-5-32-544) to support non-English Windows
-                        GroupPrincipal adminGroup = GroupPrincipal.FindByIdentity(context, IdentityType.Sid, "S-1-5-32-544");
+                    // Always ensure user is in the Administrators group (S-1-5-32-544)
+                    GroupPrincipal adminGroup = GroupPrincipal.FindByIdentity(context, IdentityType.Sid, "S-1-5-32-544");
 
-                        if (adminGroup != null)
+                    if (adminGroup != null)
+                    {
+                        if (!adminGroup.Members.Contains(user))
                         {
                             adminGroup.Members.Add(user);
                             adminGroup.Save();
                             Console.WriteLine("User is added to the Administrators group.");
                         }
-                        else
-                        {
-                            Console.Error.WriteLine("Failed to find Administrators group (S-1-5-32-544).");
-                            return false;
-                        }
                     }
+                    else
+                    {
+                        Console.Error.WriteLine("Failed to find Administrators group (S-1-5-32-544).");
+                        return false;
+                    }
+                    
                     return true;
                 }
             }
