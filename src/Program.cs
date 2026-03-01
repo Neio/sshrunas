@@ -24,22 +24,34 @@ namespace SshRunas
             
             // Robust command-line parsing to skip the current executable.
             // Environment.GetCommandLineArgs() provides correctly parsed arguments.
-            // The first argument is the path to the executable.
+            // The first argument is the path to the executable as it was invoked.
             string[] commandLineArgs = Environment.GetCommandLineArgs();
-            string executablePath = commandLineArgs[0];
+            string invokedPath = commandLineArgs[0];
             
             int i = 0;
             bool inQuotes = false;
-            // Find the end of the executable path in the raw command line
-            for (; i < commandLine.Length; i++)
+            // Find the end of the invoked path in the raw command line.
+            // We need to be careful as invokedPath might be a short name or full path.
+            // The most reliable way to get the *rest* of the command line is to find where 
+            // the first argument ends in the raw string.
+            
+            // If the first part is quoted, find the closing quote.
+            if (commandLine.StartsWith("\""))
             {
-                if (commandLine[i] == '"') inQuotes = !inQuotes;
-                if (commandLine[i] == ' ' && !inQuotes)
+                inQuotes = true;
+                i = 1;
+                while (i < commandLine.Length && (commandLine[i] != '"' || inQuotes == false))
                 {
-                    // Check if we matched the executable path
-                    string candidate = commandLine.Substring(0, i).Trim('\"');
-                    if (string.Equals(candidate, executablePath, StringComparison.OrdinalIgnoreCase))
-                        break;
+                    i++;
+                }
+                if (i < commandLine.Length) i++; // Skip the closing quote
+            }
+            else
+            {
+                // Unquoted, find the first space
+                while (i < commandLine.Length && commandLine[i] != ' ')
+                {
+                    i++;
                 }
             }
             
@@ -125,7 +137,7 @@ namespace SshRunas
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to create or configure user: {ex.Message}");
+                Console.Error.WriteLine($"Failed to create or configure user: {ex}");
                 return false;
             }
         }
@@ -189,9 +201,10 @@ namespace SshRunas
 
                 File.WriteAllLines(tempBat, lines.ToArray());
                 
-                // Use Environment.SystemDirectory to find cmd.exe reliably
+                // Use Environment.SystemDirectory to find cmd.exe reliably.
+                // Use /s /c and extra quotes to safely handle paths with special characters.
                 var comSpec = Path.Combine(Environment.SystemDirectory, "cmd.exe");
-                var actualCmd = $"\"{comSpec}\" /c \"{tempBat.Replace("\"", "")}\"";
+                var actualCmd = $"\"{comSpec}\" /s /c \"\"{tempBat.Replace("\"", "")}\"\"";
 
                 using (var client = new SshClient(host, user, password))
                 {
@@ -210,11 +223,11 @@ namespace SshRunas
             }
             catch (IOException ex)
             {
-                Console.Error.WriteLine($"File operation failed: {ex.Message}");
+                Console.Error.WriteLine($"File operation failed: {ex}");
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"SSH execution failed: {ex.Message}");
+                Console.Error.WriteLine($"SSH execution failed: {ex}");
             }
             finally
             {
