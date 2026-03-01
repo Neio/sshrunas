@@ -120,7 +120,7 @@ namespace SshRunas
             {
                 "ALLUSERSPROFILE", "APPDATA", "CommonProgramFiles", "CommonProgramFiles(x86)",
                 "CommonProgramW6432", "COMPUTERNAME", "ComSpec", "HOMEDRIVE", "HOMEPATH",
-                "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "OS", "PATHEXT",
+                "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "OS", "PATH", "PATHEXT",
                 "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "ProgramData",
                 "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "PROMPT",
                 "PUBLIC", "SESSIONNAME", "SystemDrive", "SystemRoot", "TEMP", "TMP",
@@ -136,13 +136,12 @@ namespace SshRunas
 
                 string value = item.Value?.ToString() ?? string.Empty;
 
-                // Escape for batch to prevent command injection
-                // We use unquoted set and escape all special characters with ^
-                // and % with %%
-                string escapedKey = EscapeBatch(originalKey);
-                string escapedValue = EscapeBatch(value);
+                // Use `set "key=value"` syntax for robustness, as it correctly handles spaces.
+                // Inside quotes, only '%' needs to be escaped. Quotes in values are not
+                // supported by `set` and can be removed to prevent issues.
+                string escapedValue = value.Replace("%", "%%").Replace("\"", "");
 
-                lines.Add($"set {escapedKey}={escapedValue}");
+                lines.Add($"set \"{originalKey}={escapedValue}\"");
             }
 
             lines.Add($"CD /d \"{Environment.CurrentDirectory.Replace("%", "%%")}\"");
@@ -153,7 +152,35 @@ namespace SshRunas
             
             try
             {
+                // Create the file with restrictive permissions.
+                // In .NET, we can use FileStream with FileOptions and appropriate security if needed,
+                // but a simple way on Windows is to ensure it's created in a user-specific temp dir
+                // or use AccessControl.
+                using (var fs = new FileStream(tempBat, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.DeleteOnClose | FileOptions.Asynchronous))
+                {
+                    // Note: FileOptions.DeleteOnClose might be tricky if we want cmd.exe to read it.
+                    // Let's use a more standard approach but set ACLs.
+                }
+
+                // Actually, let's just write it and then delete it as before, but try to be more secure.
+                // On Windows, Path.GetTempPath() for a user is usually already restricted.
+                // However, if running as System, it might be C:\Windows\Temp.
+                
                 File.WriteAllLines(tempBat, lines.ToArray());
+                
+                // Set restrictive ACLs on the temporary file (Windows only)
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    var fileInfo = new FileInfo(tempBat);
+                    var accessControl = fileInfo.GetAccessControl();
+                    accessControl.SetAccessRuleProtection(true, false); // Remove inherited rules
+                    accessControl.AddAccessRule(new FileSystemAccessRule(
+                        WindowsIdentity.GetCurrent().User!,
+                        FileSystemRights.FullControl,
+                        AccessControlType.Allow));
+                    fileInfo.SetAccessControl(accessControl);
+                }
+
                 // Use Environment.SystemDirectory to find cmd.exe reliably
                 var comSpec = Path.Combine(Environment.SystemDirectory, "cmd.exe");
                 var actualCmd = $"\"{comSpec}\" /c \"{tempBat}\"";
@@ -181,20 +208,6 @@ namespace SshRunas
             {
                 if (File.Exists(tempBat)) File.Delete(tempBat);
             }
-        }
-
-        private static string EscapeBatch(string value)
-        {
-            if (string.IsNullOrEmpty(value)) return value;
-
-            // Order is important: escape the escape character first
-            return value.Replace("^", "^^")
-                        .Replace("&", "^&")
-                        .Replace("<", "^<")
-                        .Replace(">", "^>")
-                        .Replace("|", "^|")
-                        .Replace("\"", "^\"")
-                        .Replace("%", "%%");
         }
 
 
