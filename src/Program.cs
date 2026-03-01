@@ -137,14 +137,15 @@ namespace SshRunas
                 string value = item.Value?.ToString() ?? string.Empty;
 
                 // Use `set "key=value"` syntax for robustness, as it correctly handles spaces.
-                // Inside quotes, only '%' needs to be escaped. Quotes in values are not
+                // Inside quotes, only '%' needs to be escaped. Quotes in values/names are not
                 // supported by `set` and can be removed to prevent issues.
+                string escapedKey = originalKey.Replace("\"", "");
                 string escapedValue = value.Replace("%", "%%").Replace("\"", "");
 
-                lines.Add($"set \"{originalKey}={escapedValue}\"");
+                lines.Add($"set \"{escapedKey}={escapedValue}\"");
             }
 
-            lines.Add($"CD /d \"{Environment.CurrentDirectory.Replace("%", "%%")}\"");
+            lines.Add($"CD /d \"{Environment.CurrentDirectory.Replace("%", "%%").Replace("\"", "")}\"");
             lines.Add(command.Replace("%", "%%"));
 
             var tempPath = Path.GetTempPath();
@@ -152,38 +153,26 @@ namespace SshRunas
             
             try
             {
-                // Create the file with restrictive permissions.
-                // In .NET, we can use FileStream with FileOptions and appropriate security if needed,
-                // but a simple way on Windows is to ensure it's created in a user-specific temp dir
-                // or use AccessControl.
-                using (var fs = new FileStream(tempBat, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.DeleteOnClose | FileOptions.Asynchronous))
-                {
-                    // Note: FileOptions.DeleteOnClose might be tricky if we want cmd.exe to read it.
-                    // Let's use a more standard approach but set ACLs.
-                }
-
-                // Actually, let's just write it and then delete it as before, but try to be more secure.
-                // On Windows, Path.GetTempPath() for a user is usually already restricted.
-                // However, if running as System, it might be C:\Windows\Temp.
-                
-                File.WriteAllLines(tempBat, lines.ToArray());
-                
-                // Set restrictive ACLs on the temporary file (Windows only)
+                // Create the file with restrictive permissions from the start on Windows.
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    var fileInfo = new FileInfo(tempBat);
-                    var accessControl = fileInfo.GetAccessControl();
-                    accessControl.SetAccessRuleProtection(true, false); // Remove inherited rules
-                    accessControl.AddAccessRule(new FileSystemAccessRule(
+                    var fileSecurity = new FileSecurity();
+                    fileSecurity.SetAccessRuleProtection(true, false);
+                    fileSecurity.AddAccessRule(new FileSystemAccessRule(
                         WindowsIdentity.GetCurrent().User!,
                         FileSystemRights.FullControl,
                         AccessControlType.Allow));
-                    fileInfo.SetAccessControl(accessControl);
+                    
+                    var fileInfo = new FileInfo(tempBat);
+                    using (fileInfo.Create()) { }
+                    fileInfo.SetAccessControl(fileSecurity);
                 }
 
+                File.WriteAllLines(tempBat, lines.ToArray());
+                
                 // Use Environment.SystemDirectory to find cmd.exe reliably
                 var comSpec = Path.Combine(Environment.SystemDirectory, "cmd.exe");
-                var actualCmd = $"\"{comSpec}\" /c \"{tempBat}\"";
+                var actualCmd = $"\"{comSpec}\" /c \"{tempBat.Replace("\"", "")}\"";
 
                 using (var client = new SshClient(host, user, password))
                 {
@@ -199,6 +188,10 @@ namespace SshRunas
                         await Task.WhenAll(stdoutTask, stderrTask, Task.Factory.FromAsync(result, cmd.EndExecute));
                     }
                 }
+            }
+            catch (IOException ex)
+            {
+                Console.Error.WriteLine($"File operation failed: {ex.Message}");
             }
             catch (Exception ex)
             {
