@@ -27,7 +27,7 @@ namespace SshRunas
             string[] argsList = Environment.GetCommandLineArgs();
             string exePath = argsList[0];
             
-            int commandStartIndex = commandLine.IndexOf(exePath);
+            int commandStartIndex = commandLine.IndexOf(exePath, StringComparison.OrdinalIgnoreCase);
             if (commandStartIndex != -1)
             {
                 commandStartIndex += exePath.Length;
@@ -180,7 +180,7 @@ namespace SshRunas
             }
 
             lines.Add($"CD /d \"{Environment.CurrentDirectory.Replace("%", "%%").Replace("\"", "").Replace("\r", "").Replace("\n", "")}\"");
-            lines.Add(command.Replace("%", "%%"));
+            lines.Add(command.Replace("%", "%%").Replace("\r", "").Replace("\n", ""));
 
             var tempPath = Path.GetTempPath();
             string tempBat = Path.Combine(tempPath, $"{Guid.NewGuid()}.bat");
