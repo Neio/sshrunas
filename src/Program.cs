@@ -125,19 +125,24 @@ namespace SshRunas
                 "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "PROMPT",
                 "PUBLIC", "SESSIONNAME", "SystemDrive", "SystemRoot", "TEMP", "TMP",
                 "USERDOMAIN", "USERNAME", "USERPROFILE", "WINDIR", "LOGONSERVER",
-                "USERDOMAIN_ROAMINGPROFILE", "USERDNSDOMAIN", "CLIENTNAME"
+                "USERDOMAIN_ROAMINGPROFILE", "USERDNSDOMAIN", "CLIENTNAME",
+                "SSH_RUNNER_USER", "SSH_RUNNER_PWD" // Exclude sensitive credentials
             };
 
             foreach (DictionaryEntry item in envVars)
             {
-                string key = item.Key.ToString()!.Replace("%", "%%");
-                if (builtInVars.Contains(key)) continue;
+                string originalKey = item.Key.ToString()!;
+                if (builtInVars.Contains(originalKey)) continue;
 
                 string value = item.Value?.ToString() ?? string.Empty;
-                // Only escape % for batch files. ^ & | < > are safe inside set "key=value"
-                value = value.Replace("%", "%%");
 
-                lines.Add($"set \"{key}={value}\"");
+                // Escape for batch to prevent command injection
+                // We use unquoted set and escape all special characters with ^
+                // and % with %%
+                string escapedKey = EscapeBatch(originalKey);
+                string escapedValue = EscapeBatch(value);
+
+                lines.Add($"set {escapedKey}={escapedValue}");
             }
 
             lines.Add($"CD /d \"{Environment.CurrentDirectory.Replace("%", "%%")}\"");
@@ -149,29 +154,23 @@ namespace SshRunas
             try
             {
                 File.WriteAllLines(tempBat, lines.ToArray());
-                var comSpec = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
+                // Use Environment.SystemDirectory to find cmd.exe reliably
+                var comSpec = Path.Combine(Environment.SystemDirectory, "cmd.exe");
                 var actualCmd = $"\"{comSpec}\" /c \"{tempBat}\"";
 
                 using (var client = new SshClient(host, user, password))
                 {
                     client.Connect();
-                    var cmd = client.CreateCommand(actualCmd);
-                    
-                    // Use a simple synchronous execution for stdout/stderr if possible, 
-                    // or properly handle the async streams.
-                    var result = cmd.BeginExecute();
-                    
-                    var stdoutTask = Task.Run(() => {
-                        using var reader = new StreamReader(cmd.OutputStream);
-                        while (!reader.EndOfStream) Console.WriteLine(reader.ReadLine());
-                    });
+                    using (var cmd = client.CreateCommand(actualCmd))
+                    {
+                        var result = cmd.BeginExecute();
 
-                    var stderrTask = Task.Run(() => {
-                        using var reader = new StreamReader(cmd.ExtendedOutputStream);
-                        while (!reader.EndOfStream) Console.Error.WriteLine(reader.ReadLine());
-                    });
+                        // Use CopyToAsync for efficient, non-blocking stream handling
+                        var stdoutTask = cmd.OutputStream.CopyToAsync(Console.OpenStandardOutput());
+                        var stderrTask = cmd.ExtendedOutputStream.CopyToAsync(Console.OpenStandardError());
 
-                    await Task.WhenAll(stdoutTask, stderrTask, Task.Factory.FromAsync(result, cmd.EndExecute));
+                        await Task.WhenAll(stdoutTask, stderrTask, Task.Factory.FromAsync(result, cmd.EndExecute));
+                    }
                 }
             }
             catch (Exception ex)
@@ -182,6 +181,20 @@ namespace SshRunas
             {
                 if (File.Exists(tempBat)) File.Delete(tempBat);
             }
+        }
+
+        private static string EscapeBatch(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+
+            // Order is important: escape the escape character first
+            return value.Replace("^", "^^")
+                        .Replace("&", "^&")
+                        .Replace("<", "^<")
+                        .Replace(">", "^>")
+                        .Replace("|", "^|")
+                        .Replace("\"", "^\"")
+                        .Replace("%", "%%");
         }
 
 
