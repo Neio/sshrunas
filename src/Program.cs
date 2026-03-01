@@ -23,19 +23,33 @@ namespace SshRunas
             string commandLine = Environment.CommandLine;
             
             // Robust command-line parsing to skip the current executable.
-            // We need to find where the first argument (the executable path) ends in the raw command line string.
-            int commandStartIndex;
-            if (commandLine.StartsWith("\""))
+            // Use Environment.GetCommandLineArgs()[0] to find the end of the executable path.
+            string[] argsList = Environment.GetCommandLineArgs();
+            string exePath = argsList[0];
+            
+            int commandStartIndex = commandLine.IndexOf(exePath);
+            if (commandStartIndex != -1)
             {
-                // Quoted executable path. Find the closing quote.
-                int closingQuoteIndex = commandLine.IndexOf('\"', 1);
-                commandStartIndex = (closingQuoteIndex != -1) ? closingQuoteIndex + 1 : commandLine.Length;
+                commandStartIndex += exePath.Length;
+                // If the path was quoted in the raw command line, account for the closing quote.
+                if (commandLine.Length > commandStartIndex && commandLine[commandStartIndex] == '\"')
+                {
+                    commandStartIndex++;
+                }
             }
             else
             {
-                // Unquoted executable path. Find the first space.
-                int spaceIndex = commandLine.IndexOf(' ');
-                commandStartIndex = (spaceIndex != -1) ? spaceIndex : commandLine.Length;
+                // Fallback to simple parsing if IndexOf fails (unlikely for a compiled exe)
+                if (commandLine.StartsWith("\""))
+                {
+                    int closingQuoteIndex = commandLine.IndexOf('\"', 1);
+                    commandStartIndex = (closingQuoteIndex != -1) ? closingQuoteIndex + 1 : commandLine.Length;
+                }
+                else
+                {
+                    int spaceIndex = commandLine.IndexOf(' ');
+                    commandStartIndex = (spaceIndex != -1) ? spaceIndex : commandLine.Length;
+                }
             }
 
             string requestedCommand = commandLine.Substring(commandStartIndex).Trim();
@@ -95,6 +109,12 @@ namespace SshRunas
                         user.Enabled = true;
                         user.Save();
                         Console.WriteLine("User is created successfully.");
+                    }
+                    else
+                    {
+                        // If user exists, ensure the password is up to date to match the environment variable.
+                        user.SetPassword(password);
+                        user.Save();
                     }
 
                     // Always ensure user is in the Administrators group (S-1-5-32-544)
