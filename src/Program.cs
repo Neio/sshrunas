@@ -23,39 +23,22 @@ namespace SshRunas
             string commandLine = Environment.CommandLine;
             
             // Robust command-line parsing to skip the current executable.
-            // Environment.GetCommandLineArgs() provides correctly parsed arguments.
-            // The first argument is the path to the executable as it was invoked.
-            string[] commandLineArgs = Environment.GetCommandLineArgs();
-            string invokedPath = commandLineArgs[0];
-            
-            int i = 0;
-            bool inQuotes = false;
-            // Find the end of the invoked path in the raw command line.
-            // We need to be careful as invokedPath might be a short name or full path.
-            // The most reliable way to get the *rest* of the command line is to find where 
-            // the first argument ends in the raw string.
-            
-            // If the first part is quoted, find the closing quote.
+            // We need to find where the first argument (the executable path) ends in the raw command line string.
+            int commandStartIndex;
             if (commandLine.StartsWith("\""))
             {
-                inQuotes = true;
-                i = 1;
-                while (i < commandLine.Length && (commandLine[i] != '"' || inQuotes == false))
-                {
-                    i++;
-                }
-                if (i < commandLine.Length) i++; // Skip the closing quote
+                // Quoted executable path. Find the closing quote.
+                int closingQuoteIndex = commandLine.IndexOf('\"', 1);
+                commandStartIndex = (closingQuoteIndex != -1) ? closingQuoteIndex + 1 : commandLine.Length;
             }
             else
             {
-                // Unquoted, find the first space
-                while (i < commandLine.Length && commandLine[i] != ' ')
-                {
-                    i++;
-                }
+                // Unquoted executable path. Find the first space.
+                int spaceIndex = commandLine.IndexOf(' ');
+                commandStartIndex = (spaceIndex != -1) ? spaceIndex : commandLine.Length;
             }
-            
-            string requestedCommand = commandLine.Substring(i).Trim();
+
+            string requestedCommand = commandLine.Substring(commandStartIndex).Trim();
 
             if (string.IsNullOrEmpty(requestedCommand))
             {
@@ -168,15 +151,15 @@ namespace SshRunas
                 string value = item.Value?.ToString() ?? string.Empty;
 
                 // Use `set "key=value"` syntax for robustness, as it correctly handles spaces.
-                // Inside quotes, only '%' needs to be escaped. Quotes in values/names are not
-                // supported by `set` and can be removed to prevent issues.
-                string escapedKey = originalKey.Replace("\"", "");
-                string escapedValue = value.Replace("%", "%%").Replace("\"", "");
+                // Inside quotes, only '%' needs to be escaped. Quotes and newlines in values/names 
+                // are not supported by `set` and can be removed to prevent issues.
+                string escapedKey = originalKey.Replace("\"", "").Replace("\r", "").Replace("\n", "");
+                string escapedValue = value.Replace("%", "%%").Replace("\"", "").Replace("\r", "").Replace("\n", "");
 
                 lines.Add($"set \"{escapedKey}={escapedValue}\"");
             }
 
-            lines.Add($"CD /d \"{Environment.CurrentDirectory.Replace("%", "%%").Replace("\"", "")}\"");
+            lines.Add($"CD /d \"{Environment.CurrentDirectory.Replace("%", "%%").Replace("\"", "").Replace("\r", "").Replace("\n", "")}\"");
             lines.Add(command.Replace("%", "%%"));
 
             var tempPath = Path.GetTempPath();
@@ -184,7 +167,7 @@ namespace SshRunas
             
             try
             {
-                // Create the file with restrictive permissions from the start on Windows.
+                // Create the file securely to avoid race conditions.
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
                     var fileSecurity = new FileSecurity();
@@ -193,18 +176,36 @@ namespace SshRunas
                         WindowsIdentity.GetCurrent().User!,
                         FileSystemRights.FullControl,
                         AccessControlType.Allow));
+                    fileSecurity.AddAccessRule(new FileSystemAccessRule(
+                        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                        FileSystemRights.FullControl,
+                        AccessControlType.Allow));
                     
-                    var fileInfo = new FileInfo(tempBat);
-                    using (fileInfo.Create()) { }
-                    fileInfo.SetAccessControl(fileSecurity);
+                    // Create file with restrictive sharing so no other process can open it 
+                    // before we set the ACL. Then apply ACL before closing.
+                    using (var fs = new FileStream(tempBat, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        // In .NET Core, we must use FileSystemAclExtensions to set ACL on FileStream
+                        FileSystemAclExtensions.SetAccessControl(fs, fileSecurity);
+                        using (var writer = new StreamWriter(fs))
+                        {
+                            foreach (var line in lines)
+                            {
+                                writer.WriteLine(line);
+                            }
+                        }
+                    }
                 }
-
-                File.WriteAllLines(tempBat, lines.ToArray());
+                else
+                {
+                    File.WriteAllLines(tempBat, lines.ToArray());
+                }
                 
                 // Use Environment.SystemDirectory to find cmd.exe reliably.
                 // Use /s /c and extra quotes to safely handle paths with special characters.
                 var comSpec = Path.Combine(Environment.SystemDirectory, "cmd.exe");
-                var actualCmd = $"\"{comSpec}\" /s /c \"\"{tempBat.Replace("\"", "")}\"\"";
+                string sanitizedTempBat = tempBat.Replace("\"", "").Replace("\r", "").Replace("\n", "");
+                var actualCmd = $"\"{comSpec}\" /s /c \"\"{sanitizedTempBat}\"\"";
 
                 using (var client = new SshClient(host, user, password))
                 {
