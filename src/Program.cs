@@ -90,12 +90,6 @@ namespace SshRunas
 
         private static bool CreateUserIfNecessary(string username, string password)
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                Console.WriteLine("Skipping user creation on non-Windows platform.");
-                return true;
-            }
-
             try
             {
                 using (PrincipalContext context = new PrincipalContext(ContextType.Machine))
@@ -188,37 +182,30 @@ namespace SshRunas
             try
             {
                 // Create the file securely to avoid race conditions.
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                var fileSecurity = new FileSecurity();
+                fileSecurity.SetAccessRuleProtection(true, false);
+                fileSecurity.AddAccessRule(new FileSystemAccessRule(
+                    WindowsIdentity.GetCurrent().User!,
+                    FileSystemRights.FullControl,
+                    AccessControlType.Allow));
+                fileSecurity.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                    FileSystemRights.FullControl,
+                    AccessControlType.Allow));
+                
+                // Create file with restrictive sharing so no other process can open it 
+                // before we set the ACL. Then apply ACL before closing.
+                using (var fs = new FileStream(tempBat, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
-                    var fileSecurity = new FileSecurity();
-                    fileSecurity.SetAccessRuleProtection(true, false);
-                    fileSecurity.AddAccessRule(new FileSystemAccessRule(
-                        WindowsIdentity.GetCurrent().User!,
-                        FileSystemRights.FullControl,
-                        AccessControlType.Allow));
-                    fileSecurity.AddAccessRule(new FileSystemAccessRule(
-                        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
-                        FileSystemRights.FullControl,
-                        AccessControlType.Allow));
-                    
-                    // Create file with restrictive sharing so no other process can open it 
-                    // before we set the ACL. Then apply ACL before closing.
-                    using (var fs = new FileStream(tempBat, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    // In .NET Core, we must use FileSystemAclExtensions to set ACL on FileStream
+                    FileSystemAclExtensions.SetAccessControl(fs, fileSecurity);
+                    using (var writer = new StreamWriter(fs))
                     {
-                        // In .NET Core, we must use FileSystemAclExtensions to set ACL on FileStream
-                        FileSystemAclExtensions.SetAccessControl(fs, fileSecurity);
-                        using (var writer = new StreamWriter(fs))
+                        foreach (var line in lines)
                         {
-                            foreach (var line in lines)
-                            {
-                                writer.WriteLine(line);
-                            }
+                            writer.WriteLine(line);
                         }
                     }
-                }
-                else
-                {
-                    File.WriteAllLines(tempBat, lines.ToArray());
                 }
                 
                 // Use Environment.SystemDirectory to find cmd.exe reliably.
